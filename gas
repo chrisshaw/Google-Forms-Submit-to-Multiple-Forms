@@ -1,0 +1,437 @@
+/*Put this in the script editor of your Google Form.*/
+
+/*Spreadsheet IDs*/
+var ATTENDEE_ID = '0Am50ogq-NXZZdFVrSk5VblIzMlVmcXhPSEdKWUFzV0E';
+var PUBLIC_PRAYER_ID = '0Am50ogq-NXZZdHJ4RlQ5bklFeGtFZFBJZVJhalNBZ3c';
+var PRIVATE_PRAYER_ID = '0Am50ogq-NXZZdGVFYk5YN0ZGckVpeTNIeGc5X2Y3LVE';
+
+var TRANSLATOR = {
+  Phone: 'phone',
+  'I heard about Quest from...': 'referralType',
+  'Name of friend, event, website, or print communication': 'referralName',
+  "I'd like more info about Quest...": 'interest'
+}
+
+/*Input data into respective spreadsheets*/
+function onFormSubmit(r) {
+  var itemResponse, formResponse = r.response, itemResponses = formResponse.getItemResponses();
+  
+  var referenceItems = {};
+  for (var item = 0, len = itemResponses.length; item < len; ++item) {
+    itemResponse = itemResponses[item];
+    var responseTitle = itemResponse.getItem().getTitle();
+               
+    /*Create a new object with each of the Items for later easy reference*/
+    referenceItems[responseTitle] = itemResponse.getItem();
+  }
+  Logger.log(referenceItems);
+  var name = formResponse.getResponseForItem(referenceItems['Name']).getResponse();
+  var email = formResponse.getResponseForItem(referenceItems['Email']).getResponse();
+  var timestamp = formResponse.getTimestamp();
+  var prayerRequest = formResponse.getResponseForItem(referenceItems['Prayer Request']).getResponse();
+  
+  /*Submit any prayer request to the private list*/  
+  if(prayerRequest.length > 0){    
+    /*Fill the request array with the corresponding information: TimeStamp | Requester | Request */    
+    var request = {
+      'timestamp' : timestamp,
+      'requester' : name,
+      'request' : prayerRequest
+    };
+
+    fillPrayerRequest(request, PRIVATE_PRAYER_ID);
+
+    /*Check to see if this is private. If not, submit the same request to the public list*/
+    if(!referenceItems['Who should see this prayer request?']){
+      fillPrayerRequest(request, PUBLIC_PRAYER_ID);
+    } else {
+      delete referenceItems['Who should see this prayer request?'];
+      Logger.log(referenceItems);
+    }
+    delete referenceItems['Prayer Request'];
+    Logger.log(referenceItems);
+  }
+  
+  delete referenceItems['Name'];
+  delete referenceItems['Email'];
+  
+  Logger.log(referenceItems);
+  
+  /*build an object of content that should be updated or added*/
+  var changes = {};
+  for(var key in referenceItems){
+    changes[key] = formResponse.getResponseForItem(referenceItems[key]).getResponse();
+  }
+
+  Logger.log("name:" + name);
+  Logger.log("email: " + email);
+  Logger.log("changes:")
+  Logger.log(changes);
+
+  updateRecord(name, email, changes, ATTENDEE_ID, TRANSLATOR, timestamp, true);
+  Logger.log("record updated");
+
+}
+
+function fillPrayerRequest(input, sheetId){
+  var journal = SpreadsheetApp.openById(sheetId);
+  var journalSheet = journal.getSheets()[0];
+  var newRequestRow = journalSheet.getDataRange().getLastRow() + 1;
+  var numberColumns = journalSheet.getDataRange().getLastColumn() - 1;
+  var headers = journalSheet.getRange(1, 1, 1, numberColumns);
+  
+  var inputObjectArray = [input];
+  setRowsData(journalSheet, inputObjectArray, headers, newRequestRow);
+}
+
+/*updateRecord
+-name: string name to parse
+-email: string email to search for
+-updateItems: object with values to various fields
+-sheetId: the id to the workbook to open
+-optTranslator: object that translates the keys in the updateItems object to the headers in the record. Otherwise
+  assumes headers and keys match.
+*/
+function updateRecord(name, email, updateItems, sheetId, translator, time, useTranslator, row){
+  /*Do some attendee magic
+    -Check to see if that person is already in the list
+    -Add the person if not in the list
+    -Update first visit if they're new
+    -Update any info
+    -Update last visit
+    -Increment the Sunday Attended Count
+  */
+  
+  var names = name.split(" ");
+  var firstName = names.splice(0,1);
+  var lastName = names.join(" ");
+  if(!lastName){
+    lastName = null;
+  }
+  
+  Logger.log('"%s": first is "%s". Last is "%s".',name, firstName, lastName);
+  Logger.log("updateItems:");
+  Logger.log(updateItems);
+  Logger.log("translator");
+  Logger.log(translator);
+  
+  var attendeeSs = SpreadsheetApp.openById(sheetId);
+  var attendeeSheet = attendeeSs.getSheets()[0];
+  var dataRange = attendeeSheet.getDataRange();
+  var data = getRowsData(attendeeSheet, dataRange, 1);
+  var lastRow = dataRange.getLastRow() + 1;
+  var numberColumns = dataRange.getLastColumn();
+  var headers = attendeeSheet.getRange(1, 1, 1, numberColumns);
+  Logger.log(headers.getValues());
+  
+  var attendeeRow = -1;
+  if(row>0){
+    attendeeRow = row-1; //This came from the connection card batcher. It's the exact right row, so we need to subtract one so that it matches with the rows that come from the search
+  } else {
+  
+    Logger.log('Email: ' + email);
+    if(email !== 'no@thanks.com'){
+      attendeeRow = findRow(data, 'email', email, 1);    
+    }
+    if(attendeeRow < 0){
+      attendeeRow = findRow(data, 'email2', email, 1);
+    }
+    Logger.log('Phone: ' + updateItems['phone']);
+    if(attendeeRow < 0){
+      if(data['phone'] && updateItems['phone']){
+        attendeeRow = findRow(data, 'phone', updateItems['phone'], 1);
+      }
+    }
+  }
+  
+  Logger.log('Attendee row: ' + attendeeRow);
+  
+  var isNew = false;
+  var submitRow = 0;
+  var attendee;
+  if(attendeeRow > 0){
+    attendee = data[attendeeRow];
+    attendee['lastVisit'] = time;
+    attendee['sundaysAttended']++;
+    submitRow = attendeeRow + 1;
+  } else {
+    isNew = true;
+    attendee = {
+      name: name,
+      first: firstName,
+      last: lastName,
+      email: email,
+      email2: null,
+      firstVisit: time,
+      lastVisit: time,
+      sundaysAttended: 1.0
+    };
+    submitRow = lastRow;
+  }
+  for(var key in updateItems){
+    if(useTranslator){
+      attendee[translator[key]] = updateItems[key].toString();
+    } else {
+      attendee[key] = updateItems[key].toString();
+    }
+  }
+  for(var item in attendee){
+    if(attendee[item]=='undefined' || attendee[item]==undefined){
+      attendee[item] = null;
+    }
+  }
+  Logger.log('Sundays attended: ' + attendee['sundaysAttended']);
+  setRowsData(attendeeSheet, [attendee], headers, submitRow);  
+  if(isNew){
+    addToAttendance(attendee);
+    var body =
+        'A new record has been created for ' + name + '. ' + 
+          'Make sure to check that this is in fact someone new. ' + 
+            'If not, merge the records by updating the old record with any new information and deleting the new record.';
+    MailApp.sendEmail('connect@quest-church.com', 'New connection card submission needs a look!', body);    
+  }
+}
+
+function addToAttendance(attendee){
+  var sheetId = '1NboS1P_4kzSawIOagCw1M7PCsbRpvbI5IDYPCyqxAIY'
+  var sheet = SpreadsheetApp.openById(sheetId).getSheets()[0];
+  var newRow = sheet.getLastRow() + 1;
+  var headersRange = sheet.getRange(1, 1, 1, 4);
+  var timestamp = new Date();
+  var submissionData = {
+    sunday: timestamp,
+    name: attendee.name,
+    guests: 0,
+    count: 1
+  };
+  setRowsData(sheet, [submissionData], headersRange, newRow);
+  var reduceAnonSubmission = {
+    sunday: timestamp,
+    name: 'New connection (Reduce anonymous count by 1)',
+    guests: 0,
+    count: -1
+  };
+  setRowsData(sheet, [reduceAnonSubmission], headersRange, newRow+1);
+}  
+
+function findRow(data, dataField, matchTerm, startNumber){
+  var foundRow = -1
+  Logger.log('Finding row...');
+  Logger.log('Searching for: ' + dataField);
+  Logger.log('Term to match: ' + matchTerm);
+  Logger.log('Number of records: ' + data.length);
+  for(var i = startNumber; i < data.length; i++){
+    Logger.log("This record's " + dataField + ': ' + data[i][dataField]);
+    if(data[i][dataField] === matchTerm){
+      foundRow = i;
+      return foundRow;
+    }
+  }
+}
+
+function testUpdate(){
+  var name = "test";
+  var email = "test@test.com";
+  var updates = {
+    Phone: 8123919623,
+    'I heard about Quest from...': 'a friend',
+    'Name of friend or event': "Joe"
+  };
+  updateRecord(name, email, updates, ATTENDEE_ID, TRANSLATOR, 'now', true);
+}
+
+/*Utilities*/
+//
+//
+//
+//
+//
+//
+//
+// getRowsData iterates row by row in the input range and returns an array of objects.
+// Each object contains all the data for a given row, indexed by its normalized column name.
+// Arguments:
+//   - sheet: the sheet object that contains the data to be processed
+//   - range: the exact range of cells where the data is stored
+//   - columnHeadersRowIndex: specifies the row number where the column names are stored.
+//       This argument is optional and it defaults to the row immediately above range;
+// Returns an Array of objects.
+function getRowsData(sheet, range, columnHeadersRowIndex) {
+  columnHeadersRowIndex = columnHeadersRowIndex || range.getRowIndex() - 1;
+  var numColumns = range.getLastColumn() - range.getColumn() + 1;
+  var headersRange = sheet.getRange(columnHeadersRowIndex, range.getColumn(), 1, numColumns);
+  var headers = headersRange.getValues()[0];
+  return getObjects(range.getValues(), normalizeHeaders(headers));
+}
+
+// getColumnsData iterates column by column in the input range and returns an array of objects.
+// Each object contains all the data for a given column, indexed by its normalized row name.
+// Arguments:
+//   - sheet: the sheet object that contains the data to be processed
+//   - range: the exact range of cells where the data is stored
+//   - rowHeadersColumnIndex: specifies the column number where the row names are stored.
+//       This argument is optional and it defaults to the column immediately left of the range;
+// Returns an Array of objects.
+function getColumnsData(sheet, range, rowHeadersColumnIndex) {
+  rowHeadersColumnIndex = rowHeadersColumnIndex || range.getColumnIndex() - 1;
+  var headersTmp = sheet.getRange(range.getRow(), rowHeadersColumnIndex, range.getNumRows(), 1).getValues();
+  var headers = normalizeHeaders(arrayTranspose(headersTmp)[0]);
+  return getObjects(arrayTranspose(range.getValues()), headers);
+}
+
+
+// For every row of data in data, generates an object that contains the data. Names of
+// object fields are defined in keys.
+// Arguments:
+//   - data: JavaScript 2d array
+//   - keys: Array of Strings that define the property names for the objects to create
+function getObjects(data, keys) {
+  var objects = [];
+  for (var i = 0; i < data.length; ++i) {
+    var object = {};
+    var hasData = false;
+    for (var j = 0; j < data[i].length; ++j) {
+      var cellData = data[i][j];
+      if (isCellEmpty(cellData)) {
+        continue;
+      }
+      object[keys[j]] = cellData;
+      hasData = true;
+    }
+    if (hasData) {
+      objects.push(object);
+    }
+  }
+  return objects;
+}
+
+// Returns an Array of normalized Strings.
+// Arguments:
+//   - headers: Array of Strings to normalize
+function normalizeHeaders(headers) {
+  var keys = [];
+  for (var i = 0; i < headers.length; ++i) {
+    var key = normalizeHeader(headers[i]);
+    if (key.length > 0) {
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+// Normalizes a string, by removing all alphanumeric characters and using mixed case
+// to separate words. The output will always start with a lower case letter.
+// This function is designed to produce JavaScript object property names.
+// Arguments:
+//   - header: string to normalize
+// Examples:
+//   "First Name" -> "firstName"
+//   "Market Cap (millions) -> "marketCapMillions
+//   "1 number at the beginning is ignored" -> "numberAtTheBeginningIsIgnored"
+function normalizeHeader(header) {
+  var key = "";
+  var upperCase = false;
+  for (var i = 0; i < header.length; ++i) {
+    var letter = header[i];
+    if (letter == " " && key.length > 0) {
+      upperCase = true;
+      continue;
+    }
+    if (!isAlnum(letter)) {
+      continue;
+    }
+    if (key.length == 0 && isDigit(letter)) {
+      continue; // first character must be a letter
+    }
+    if (upperCase) {
+      upperCase = false;
+      key += letter.toUpperCase();
+    } else {
+      key += letter.toLowerCase();
+    }
+  }
+  return key;
+}
+
+// Returns true if the cell where cellData was read from is empty.
+// Arguments:
+//   - cellData: string
+function isCellEmpty(cellData) {
+  return typeof(cellData) == "string" && cellData == "";
+}
+
+// Returns true if the character char is alphabetical, false otherwise.
+function isAlnum(char) {
+  return char >= 'A' && char <= 'Z' ||
+    char >= 'a' && char <= 'z' ||
+    isDigit(char);
+}
+
+// Returns true if the character char is a digit, false otherwise.
+function isDigit(char) {
+  return char >= '0' && char <= '9';
+}
+
+// Given a JavaScript 2d Array, this function returns the transposed table.
+// Arguments:
+//   - data: JavaScript 2d Array
+// Returns a JavaScript 2d Array
+// Example: arrayTranspose([[1,2,3],[4,5,6]]) returns [[1,4],[2,5],[3,6]].
+function arrayTranspose(data) {
+  if (data.length == 0 || data[0].length == 0) {
+    return null;
+  }
+
+  var ret = [];
+  for (var i = 0; i < data[0].length; ++i) {
+    ret.push([]);
+  }
+
+  for (var i = 0; i < data.length; ++i) {
+    for (var j = 0; j < data[i].length; ++j) {
+      ret[j][i] = data[i][j];
+    }
+  }
+
+  return ret;
+}
+
+// setRowsData fills in one row of data per object defined in the objects Array.
+// For every Column, it checks if data objects define a value for it.
+// Arguments:
+//   - sheet: the Sheet Object where the data will be written
+//   - objects: an Array of Objects, each of which contains data for a row
+//   - optHeadersRange: a Range of cells where the column headers are defined. This
+//     defaults to the entire first row in sheet.
+//   - optFirstDataRowIndex: index of the first row where data should be written. This
+//     defaults to the row immediately below the headers.
+function setRowsData(sheet, objects, optHeadersRange, optFirstDataRowIndex) {
+  var headersRange = optHeadersRange || sheet.getRange(1, 1, 1, sheet.getMaxColumns());
+  var firstDataRowIndex = optFirstDataRowIndex || headersRange.getRowIndex() + 1;
+  var headers = normalizeHeaders(headersRange.getValues()[0]);
+  Logger.log(headers);
+
+  var data = [];
+  for (var i = 0; i < objects.length; ++i) {
+    var values = [];
+    for (j = 0; j < headers.length; ++j) {
+      var header = headers[j];
+      //Logger.log(header);
+      // If the header is non-empty and the object value is 0...
+      if ((header.length > 0) && (objects[i][header] == 0)) {
+        values.push(0);
+      }
+      // If the header is empty or the object value is empty...
+      else if ((!(header.length > 0)) || (objects[i][header]=='')) {
+        values.push('');
+      }
+      else {
+        values.push(objects[i][header]);
+      }
+    }
+    data.push(values);
+  }
+  var destinationRange = sheet.getRange(firstDataRowIndex, headersRange.getColumnIndex(),
+                                        objects.length, headers.length);
+  destinationRange.setValues(data);
+}
